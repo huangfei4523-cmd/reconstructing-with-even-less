@@ -1,46 +1,16 @@
 """
 数据集加载工具。
-从原始 attack.py 中提取硬编码的数据集定义，避免重复。
+通过 sys.path 导入项目根目录的 dataset.py，避免 exec() 解析源码。
 """
 
 import sys
 import os
-import importlib.util
 import pickle
-import random
-import re
 
-
-def _extract_variable_from_py(filepath, var_name):
-    """从 Python 文件中提取指定变量。"""
-    with open(filepath, "r") as f:
-        content = f.read()
-
-    # 找到变量定义的起始位置
-    pattern = rf"{var_name}\s*=\s*\["
-    match = re.search(pattern, content)
-    if not match:
-        raise ValueError(f"在 {filepath} 中找不到变量 {var_name}")
-
-    start = match.start()
-    # 找到匹配的闭合括号
-    depth = 0
-    in_bracket = False
-    end = start
-    for i, ch in enumerate(content[start:], start):
-        if ch == "[":
-            depth += 1
-            in_bracket = True
-        elif ch == "]":
-            depth -= 1
-            if in_bracket and depth == 0:
-                end = i + 1
-                break
-
-    code = content[start:end]
-    namespace = {}
-    exec(code, namespace)
-    return namespace[var_name]
+# 将项目根目录加入 sys.path，以便 from dataset import ...
+_proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _proj_root not in sys.path:
+    sys.path.insert(0, _proj_root)
 
 
 def _get_dataset_dir():
@@ -52,30 +22,33 @@ def load_dataset(name, N0=20, N1=20):
     加载指定数据集。
 
     Args:
-        name: 数据集名称 (cali_50, grid, dg, crg, nh, boat)
+        name: 数据集名称 (cali_50, cali_self, grid, dg, crg, nh, boat)
         N0, N1: grid 数据集的维度
 
     Returns:
         dict with keys: points, map_to_original, N0, N1, is_3d, N2
     """
     import process_database
-
-    # 找到原始 attack.py 路径
-    original_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..",
-        "reconstructing-with-even-less",
-    )
-    original_attack = os.path.join(original_dir, "attack.py")
+    from dataset import cali_all, cali_self, nh
 
     dataset_dir = _get_dataset_dir()
 
     if name == "cali_50":
-        # 从原 attack.py 中提取 cali_all
-        cali_all = _extract_variable_from_py(original_attack, "cali_all")
         print(f"  加载 cali_50 数据集: {len(cali_all)} 个点")
-        cali_all = process_database.scale_points(cali_all, 50, 50)
-        points, map_to_original, n0, n1 = process_database.make_database_from_points(cali_all)
+        cali_scaled = process_database.scale_points(cali_all, 50, 50)
+        points, map_to_original, n0, n1 = process_database.make_database_from_points(cali_scaled)
+        return {
+            "points": points,
+            "map_to_original": map_to_original,
+            "N0": n0,
+            "N1": n1,
+            "is_3d": False,
+        }
+
+    elif name == "cali_self":
+        print(f"  加载 cali_self 数据集: {len(cali_self)} 个点")
+        cali_scaled = process_database.scale_points(cali_self, 50, 50)
+        points, map_to_original, n0, n1 = process_database.make_database_from_points(cali_scaled)
         return {
             "points": points,
             "map_to_original": map_to_original,
@@ -125,7 +98,6 @@ def load_dataset(name, N0=20, N1=20):
         }
 
     elif name == "nh":
-        nh = _extract_variable_from_py(original_attack, "nh")
         print(f"  加载 nh 数据集: {len(nh)} 个点")
         points, map_to_original, n0, n1, n2 = process_database.make_database_from_points_3D(nh)
         return {

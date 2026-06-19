@@ -32,17 +32,26 @@ GNN 可以从**所有响应大小**的共现模式中学习，利用更多的统
 ```
 gnn_attack/
 ├── __init__.py
-├── gnn_model.py              # GNN 模型定义 + 训练数据生成
-├── train_gnn.py              # 训练脚本
+├── gnn_model.py              # GNN 模型定义 (v1: 固定特征) + 训练数据生成 v2
+├── train_gnn.py              # 训练脚本（多场景混合训练）
 ├── gnn_range_attack.py       # GNN 增强的攻击引擎
 ├── gnn_attack.py             # 主入口（攻击 + 评估 + 可视化）
 ├── range_attack.py           # 原始方法副本（用于 baseline 对比）
 ├── process_database.py       # 数据库处理（从原版复制）
-├── data_loader.py            # 数据集加载工具
+├── data_loader.py            # 数据集加载工具（包内导入 dataset.py）
 ├── datasets/                 # 数据集文件（从原版复制）
+├── docs/
+│   └── gnn-attack-design.md  # GNN 攻击方法原理分析文档
 ├── requirements.txt          # 依赖
 └── README.md                 # 本文件
 ```
+
+### ⚠️ 破坏性变更
+
+**v1 架构**（当前版本）与 v0 不兼容：
+- 模型 checkpoint 字段变更：`input_dim` → `feature_dim`，新增 `num_message_layers`
+- v0 训练的模型无法加载 → 需重新训练
+- 训练数据生成器改为多场景混合（`generate_training_data_v2`）
 
 ## 安装依赖
 
@@ -66,12 +75,12 @@ pip install -r requirements.txt
 ### 1. 训练 GNN 模型
 
 ```bash
-# 在合成网格数据上训练
+# 在多场景混合数据上训练（默认：2D网格 + 随机点云 + 3D点云）
 python train_gnn.py --epochs 50 --samples 500 --save gnn_model.pth
 
 # 自定义参数
 python train_gnn.py --epochs 100 --lr 0.001 --hidden 64 --emb 32 \
-    --samples 1000 --grid 15 15 --ratio 0.03 --save gnn_model.pth
+    --samples 1000 --save gnn_model.pth
 ```
 
 ### 2. 运行 GNN 增强攻击
@@ -101,7 +110,7 @@ done
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-points` | 数据集 (cali_50, grid, dg, crg, nh, boat) | small_grid |
+| `-points` | 数据集 (cali_50, cali_self, grid, dg, crg, nh, boat) | small_grid |
 | `-p` | 响应采样百分比 | 100 |
 | `-dist` | 采样分布 (uniform, beta, gaussian) | uniform |
 | `--model` | GNN 模型权重路径 | gnn_model.pth |

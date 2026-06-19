@@ -22,7 +22,13 @@ import tqdm
 import torch
 import os
 
-from gnn_model import EdgePredictionGNN, predict_edges_from_cooccurrence
+from gnn_model import (
+    EdgePredictionGNN,
+    predict_edges_from_cooccurrence,
+    extract_node_features,
+    extract_edge_features,
+    build_message_passing_graph,
+)
 
 
 # ─────────────────────────────────────────────────────────
@@ -95,12 +101,12 @@ def gnn_range_attack(
     print(f"共 {N} 个点")
 
     # 加载模型
-    model = _load_model(model_or_path, input_dim=N)
+    model = _load_model(model_or_path)
 
-    # GNN 预测边
+    # GNN 预测边（传入 responses 用于边特征提取）
     print(f"GNN 预测边 (阈值={threshold})...")
     edges, edge_probs = predict_edges_from_cooccurrence(
-        model, cooc_normalized, device=device, threshold=threshold
+        model, cooc_normalized, responses=responses, device=device, threshold=threshold
     )
 
     print(f"预测到 {len(edges)} 条边")
@@ -120,7 +126,7 @@ def gnn_range_attack(
     return G, len(edges), go_back
 
 
-def _load_model(model_or_path, input_dim=None):
+def _load_model(model_or_path):
     """加载模型：如果是路径则从文件加载，否则直接返回模型对象。"""
     if isinstance(model_or_path, EdgePredictionGNN):
         return model_or_path
@@ -131,16 +137,22 @@ def _load_model(model_or_path, input_dim=None):
 
         checkpoint = torch.load(model_or_path, map_location="cpu", weights_only=False)
 
-        # 从 checkpoint 读取模型配置
-        input_dim = checkpoint.get("input_dim", input_dim)
+        # 兼容旧 checkpoint（input_dim）和新 checkpoint（feature_dim）
+        if "input_dim" in checkpoint and "feature_dim" not in checkpoint:
+            raise ValueError(
+                "旧版 checkpoint 格式 (input_dim) 不再兼容。请使用新版模型重新训练。"
+            )
+
+        feature_dim = checkpoint.get("feature_dim", 16)
         hidden_dim = checkpoint.get("hidden_dim", 64)
         emb_dim = checkpoint.get("emb_dim", 32)
-
-        if input_dim is None:
-            raise ValueError("无法确定 input_dim，请提供模型参数")
+        num_mp_layers = checkpoint.get("num_message_layers", 2)
 
         model = EdgePredictionGNN(
-            input_dim=input_dim, hidden_dim=hidden_dim, emb_dim=emb_dim
+            feature_dim=feature_dim,
+            hidden_dim=hidden_dim,
+            emb_dim=emb_dim,
+            num_mp_layers=num_mp_layers,
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         return model

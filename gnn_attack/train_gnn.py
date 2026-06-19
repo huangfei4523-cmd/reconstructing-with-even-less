@@ -14,7 +14,7 @@ import torch
 
 from gnn_model import (
     EdgePredictionGNN,
-    generate_training_data,
+    generate_training_data_v2,
     CooccurrenceDataset,
     train_gnn_model,
 )
@@ -47,31 +47,29 @@ def main():
     print(f"设备: {device}")
     print(f"生成 {args.samples} 个训练样本...")
 
-    # 生成数据
-    cooc_list, adj_list = generate_training_data(
+    # 生成数据（v2: 多场景混合）
+    node_feat_list, adj_list = generate_training_data_v2(
         num_samples=args.samples,
-        grid_size=tuple(args.grid),
-        max_points_per_cell=2,
-        response_sampling_ratio=args.ratio,
+        configs=None,  # 使用默认多场景配置
     )
 
     # 划分训练/验证
-    n = len(cooc_list)
+    n = len(node_feat_list)
     n_val = max(1, int(n * args.val_split))
     indices = np.random.permutation(n)
     val_idx = indices[:n_val]
     train_idx = indices[n_val:]
 
-    train_cooc = [cooc_list[i] for i in train_idx]
+    train_feat = [node_feat_list[i] for i in train_idx]
     train_adj = [adj_list[i] for i in train_idx]
-    val_cooc = [cooc_list[i] for i in val_idx]
+    val_feat = [node_feat_list[i] for i in val_idx]
     val_adj = [adj_list[i] for i in val_idx]
 
-    print(f"训练样本: {len(train_cooc)}, 验证样本: {len(val_cooc)}")
+    print(f"训练样本: {len(train_feat)}, 验证样本: {len(val_feat)}")
 
     # 构建 DataLoader
-    train_dataset = CooccurrenceDataset(train_cooc, train_adj)
-    val_dataset = CooccurrenceDataset(val_cooc, val_adj)
+    train_dataset = CooccurrenceDataset(train_feat, train_adj)
+    val_dataset = CooccurrenceDataset(val_feat, val_adj)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=1, shuffle=True
@@ -80,10 +78,9 @@ def main():
         val_dataset, batch_size=1, shuffle=False
     )
 
-    # 创建模型
-    input_dim = cooc_list[0].shape[-1]
+    # 创建模型（固定 feature_dim=16，与 N 无关）
     model = EdgePredictionGNN(
-        input_dim=input_dim, hidden_dim=args.hidden, emb_dim=args.emb
+        feature_dim=16, hidden_dim=args.hidden, emb_dim=args.emb
     )
     print(f"模型参数: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -103,9 +100,10 @@ def main():
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "input_dim": input_dim,
+            "feature_dim": 16,
             "hidden_dim": args.hidden,
             "emb_dim": args.emb,
+            "num_message_layers": 2,
             "train_loss": train_losses[-1] if train_losses else None,
             "val_loss": val_losses[-1] if val_losses else None,
         },

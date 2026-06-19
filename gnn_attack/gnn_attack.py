@@ -100,8 +100,8 @@ def _get_correct_edges_at_scale(points, dictionarry):
         for n in neighbors:
             if n in opposite_map:
                 for nt in opposite_map[n]:
-                    edges.add((tuple(dictionarry[i]), tuple(coord)))
-                    edges.add((tuple(coord), tuple(dictionarry[i])))
+                    edges.add((tuple(dictionarry[i]), tuple(dictionarry[nt])))
+                    edges.add((tuple(dictionarry[nt]), tuple(dictionarry[i])))
     return edges
 
 
