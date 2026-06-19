@@ -16,7 +16,6 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import tqdm
-from collections import defaultdict
 
 
 # ═══════════════════════════════════════════════════════════
@@ -44,14 +43,23 @@ def extract_node_features(cooc_matrix):
         vec = cooc_matrix[i]
         total = vec.sum() + eps
         nonzero = (vec > 0).sum()
+        mean_v = vec.mean()
+        std_v = vec.std()
 
-        feat[i, 0] = vec.mean() / (N + eps)                  # F1: 平均共现度
+        feat[i, 0] = mean_v / (N + eps)                      # F1: 平均共现度
         feat[i, 1] = vec.max() / (N + eps)                   # F2: 最大共现度
         feat[i, 2] = nonzero / (N + eps)                     # F3: 共现稀疏度
-        feat[i, 3] = vec.std() / (N + eps)                   # F4: 标准差
-        feat[i, 4] = nonzero / (N + eps)                     # F5: 响应频次(用非零代理)
+        feat[i, 3] = std_v / (N + eps)                       # F4: 标准差
+
+        # F5: 共现偏度 (skewness of co-occurrence distribution)
+        centered = vec - mean_v
+        feat[i, 4] = (centered ** 3).mean() / (std_v ** 3 + eps)
+
         feat[i, 5] = total / (N * N + eps)                   # F6: 总强度归一化
-        feat[i, 6] = nonzero / (N + eps)                     # F7: 度中心性(近似)
+
+        # F7: 共现峰度 (kurtosis of co-occurrence distribution)
+        feat[i, 6] = (centered ** 4).mean() / (std_v ** 4 + eps)
+
         feat[i, 7] = 0.0                                     # F8: 聚类系数(计算开销大, 先留0)
 
         # F9-F10: 中心性近似
@@ -60,8 +68,9 @@ def extract_node_features(cooc_matrix):
         feat[i, 9] = total / (N + eps)                       # F10: 总强度
 
         # F11: 共现集中度
-        top3 = np.partition(vec, -3)[-3:]
-        feat[i, 10] = top3.sum() / (total + eps)
+        k_top = min(3, N)
+        topk = np.partition(vec, -k_top)[-k_top:] if k_top > 0 else vec
+        feat[i, 10] = topk.sum() / (total + eps)
 
         # F12: 熵-like
         p = norm_vec[norm_vec > 0]
@@ -189,24 +198,42 @@ def _make_sample_from_points(map_to_original, grid_bounds, response_sampling_rat
     if N < 4:
         return None
 
-    # 生成全部范围查询
+    # 生成范围查询（3D 场景采样优化，大网格避免枚举爆炸）
     responses_set = set()
     if is_3d:
         N0, N1, N2 = grid_bounds
-        for min0 in range(1, N0):
-            for min1 in range(1, N1):
-                for min2 in range(1, N2):
-                    for max0 in range(min0, N0):
-                        for max1 in range(min1, N1):
-                            for max2 in range(min2, N2):
-                                r = frozenset(
-                                    p for p in point_list
-                                    if min0 <= map_to_original[p][0] <= max0
-                                    and min1 <= map_to_original[p][1] <= max1
-                                    and min2 <= map_to_original[p][2] <= max2
-                                )
-                                if len(r) >= 2:
-                                    responses_set.add(r)
+        total_queries = (N0 * (N0 - 1) // 2) * (N1 * (N1 - 1) // 2) * (N2 * (N2 - 1) // 2)
+        max_queries = 5000
+
+        if total_queries > max_queries:
+            # 随机采样
+            for _ in range(max_queries):
+                min0, max0 = sorted([random.randint(1, N0 - 1), random.randint(1, N0 - 1)])
+                min1, max1 = sorted([random.randint(1, N1 - 1), random.randint(1, N1 - 1)])
+                min2, max2 = sorted([random.randint(1, N2 - 1), random.randint(1, N2 - 1)])
+                r = frozenset(
+                    p for p in point_list
+                    if min0 <= map_to_original[p][0] <= max0
+                    and min1 <= map_to_original[p][1] <= max1
+                    and min2 <= map_to_original[p][2] <= max2
+                )
+                if len(r) >= 2:
+                    responses_set.add(r)
+        else:
+            for min0 in range(1, N0):
+                for min1 in range(1, N1):
+                    for min2 in range(1, N2):
+                        for max0 in range(min0, N0):
+                            for max1 in range(min1, N1):
+                                for max2 in range(min2, N2):
+                                    r = frozenset(
+                                        p for p in point_list
+                                        if min0 <= map_to_original[p][0] <= max0
+                                        and min1 <= map_to_original[p][1] <= max1
+                                        and min2 <= map_to_original[p][2] <= max2
+                                    )
+                                    if len(r) >= 2:
+                                        responses_set.add(r)
     else:
         N0, N1 = grid_bounds
         for min0 in range(1, N0):
@@ -252,7 +279,7 @@ def _make_sample_from_points(map_to_original, grid_bounds, response_sampling_rat
                 adj_gt[i, j] = 1.0
                 adj_gt[j, i] = 1.0
 
-    return node_feat, adj_gt
+    return node_feat, adj_gt, sampled
 
 
 def generate_training_data_v2(num_samples=500, configs=None):
@@ -266,6 +293,7 @@ def generate_training_data_v2(num_samples=500, configs=None):
     Returns:
         node_features_list: list of [N, 16] 节点特征
         adjacency_list: list of [N, N] 邻接标签
+        responses_list: list of list of sets, 每个样本的采样响应
     """
     if configs is None:
         configs = [
@@ -284,6 +312,7 @@ def generate_training_data_v2(num_samples=500, configs=None):
 
     node_features_list = []
     adjacency_list = []
+    responses_list = []
 
     config_counts = {i: 0 for i in range(len(configs))}
 
@@ -316,11 +345,12 @@ def generate_training_data_v2(num_samples=500, configs=None):
         if result is not None:
             node_features_list.append(result[0])
             adjacency_list.append(result[1])
+            responses_list.append(result[2])
             config_counts[cfg_idx] += 1
             pbar.update(1)
 
     pbar.close()
-    return node_features_list, adjacency_list
+    return node_features_list, adjacency_list, responses_list
 
 
 # ═══════════════════════════════════════════════════════════
@@ -328,16 +358,19 @@ def generate_training_data_v2(num_samples=500, configs=None):
 # ═══════════════════════════════════════════════════════════
 
 class CooccurrenceDataset(torch.utils.data.Dataset):
-    """训练数据集：节点特征 + 邻接标签。"""
-    def __init__(self, node_features_list, adjacency_list):
+    """训练数据集：节点特征 + 邻接标签 + 采样响应。"""
+    def __init__(self, node_features_list, adjacency_list, responses_list):
         self.node_features = [torch.FloatTensor(f) for f in node_features_list]
         self.adjacency = [torch.FloatTensor(a) for a in adjacency_list]
+        self.responses = responses_list
 
     def __len__(self):
         return len(self.node_features)
 
     def __getitem__(self, idx):
-        return self.node_features[idx], self.adjacency[idx]
+        # 将 frozenset 转为普通列表，以便 DataLoader 正确 collate
+        resp = [list(r) for r in self.responses[idx]]
+        return self.node_features[idx], self.adjacency[idx], resp
 
 
 # ═══════════════════════════════════════════════════════════
@@ -512,22 +545,31 @@ def train_gnn_model(
         num_batches = 0
 
         for batch in train_loader:
-            node_feat, adj_gt = batch
+            node_feat, adj_gt, responses = batch
             node_feat = node_feat.to(device)
             adj_gt = adj_gt.to(device)
-            N = node_feat.shape[1]       # [1, N, F]
-            node_feat_2d = node_feat[0]  # [N, F]
+            node_feat_2d = node_feat[0]     # [N, F] — 去掉 batch 维度
+            adj_gt_2d = adj_gt[0]           # [N, N] — 去掉 batch 维度
+            responses = responses[0]        # 去掉 batch 维度
 
             # 构建消息传递图（稀疏 k-NN）
-            cooc_approx = node_feat_2d[:, :3].cpu().numpy()  # 用前3维做近似相似度
             edge_index = build_message_passing_graph_from_features(node_feat_2d.cpu().numpy(), k=10)
             edge_index = torch.LongTensor(edge_index).to(device)
 
+            if edge_index.shape[1] == 0:
+                continue
+
+            # 提取边特征
+            cooc_approx = node_feat_2d[:, :3].cpu().numpy()  # 用前3维构造近似共现
+            cooc_sim = cooc_approx @ cooc_approx.T
+            edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
+            edge_feat = torch.FloatTensor(edge_feat_np).to(device)
+
             # 前向
-            _, edge_logits = model(node_feat_2d, edge_index, None)
+            _, edge_logits = model(node_feat_2d, edge_index, edge_feat)
 
             # 收集训练边的标签（只监督消息传递图中的边）
-            edge_labels = adj_gt[edge_index[0], edge_index[1]]
+            edge_labels = adj_gt_2d[edge_index[0], edge_index[1]]
 
             pos_mask = edge_labels > 0.5
             if pos_mask.sum() == 0:
@@ -564,16 +606,27 @@ def train_gnn_model(
             val_loss = 0
             val_batches = 0
             with torch.no_grad():
-                for node_feat, adj_gt in val_loader:
+                for node_feat, adj_gt, responses in val_loader:
                     node_feat = node_feat.to(device)
                     adj_gt = adj_gt.to(device)
                     node_feat_2d = node_feat[0]
+                    adj_gt_2d = adj_gt[0]
+                    responses = responses[0]
                     edge_index = build_message_passing_graph_from_features(
                         node_feat_2d.cpu().numpy(), k=10
                     )
                     edge_index = torch.LongTensor(edge_index).to(device)
-                    _, edge_logits = model(node_feat_2d, edge_index, None)
-                    edge_labels = adj_gt[edge_index[0], edge_index[1]]
+
+                    if edge_index.shape[1] == 0:
+                        continue
+
+                    cooc_approx = node_feat_2d[:, :3].cpu().numpy()
+                    cooc_sim = cooc_approx @ cooc_approx.T
+                    edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
+                    edge_feat = torch.FloatTensor(edge_feat_np).to(device)
+
+                    _, edge_logits = model(node_feat_2d, edge_index, edge_feat)
+                    edge_labels = adj_gt_2d[edge_index[0], edge_index[1]]
 
                     pos_mask = edge_labels > 0.5
                     if pos_mask.sum() == 0:
@@ -595,7 +648,6 @@ def train_gnn_model(
 
             avg_val_loss = val_loss / max(val_batches, 1)
             val_losses.append(avg_val_loss)
-            scheduler.step()
 
             if (epoch + 1) % 10 == 0:
                 print(
@@ -603,6 +655,8 @@ def train_gnn_model(
                     f"Train Loss: {avg_train_loss:.4f}  "
                     f"Val Loss: {avg_val_loss:.4f}"
                 )
+
+        scheduler.step()
 
     return train_losses, val_losses
 
@@ -723,8 +777,6 @@ def predict_edges_from_cooccurrence(model, cooc_matrix, responses=None, device="
 
     # 提取边特征
     if responses is not None and edge_index.shape[1] > 0:
-        # 建立 token → index 映射
-        all_tokens = list(range(N))  # placeholder
         edge_feat = extract_edge_features(cooc_matrix, responses, edge_index)
         edge_feat_t = torch.FloatTensor(edge_feat).to(device)
     else:

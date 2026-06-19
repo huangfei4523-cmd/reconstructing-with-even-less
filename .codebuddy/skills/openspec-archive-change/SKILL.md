@@ -81,6 +81,7 @@ metadata:
    ```bash
    mv openspec/changes/<name> openspec/changes/archive/YYYY-MM-DD-<name>
    ```
+   将归档内容同步到主规范
 
 6. **显示摘要**
 

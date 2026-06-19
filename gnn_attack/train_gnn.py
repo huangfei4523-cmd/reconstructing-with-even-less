@@ -48,7 +48,7 @@ def main():
     print(f"生成 {args.samples} 个训练样本...")
 
     # 生成数据（v2: 多场景混合）
-    node_feat_list, adj_list = generate_training_data_v2(
+    node_feat_list, adj_list, resp_list = generate_training_data_v2(
         num_samples=args.samples,
         configs=None,  # 使用默认多场景配置
     )
@@ -62,14 +62,16 @@ def main():
 
     train_feat = [node_feat_list[i] for i in train_idx]
     train_adj = [adj_list[i] for i in train_idx]
+    train_resp = [resp_list[i] for i in train_idx]
     val_feat = [node_feat_list[i] for i in val_idx]
     val_adj = [adj_list[i] for i in val_idx]
+    val_resp = [resp_list[i] for i in val_idx]
 
     print(f"训练样本: {len(train_feat)}, 验证样本: {len(val_feat)}")
 
     # 构建 DataLoader
-    train_dataset = CooccurrenceDataset(train_feat, train_adj)
-    val_dataset = CooccurrenceDataset(val_feat, val_adj)
+    train_dataset = CooccurrenceDataset(train_feat, train_adj, train_resp)
+    val_dataset = CooccurrenceDataset(val_feat, val_adj, val_resp)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=1, shuffle=True
