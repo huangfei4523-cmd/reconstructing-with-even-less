@@ -1,23 +1,16 @@
 """测试 _get_correct_edges_at_scale 精度计算函数。"""
-import sys, os, importlib.util
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
 import numpy as np
-
-# gnn_attack 目录与 gnn_attack.py 同名，直接 importlib 加载模块
-_ga_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gnn_attack.py")
-_spec = importlib.util.spec_from_file_location("gnn_attack_mod", _ga_path)
-_ga = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_ga)
-_get_correct_edges_at_scale = _ga._get_correct_edges_at_scale
+from gnn_model import _get_correct_edges_at_scale
 
 
 class TestCorrectEdges(unittest.TestCase):
 
     def test_no_self_loops(self):
         """验证返回的边集无自环"""
-        # 两个相邻点
         map_to_original = {101: (0, 0), 102: (0, 1)}
         points = [101, 102]
         edges = _get_correct_edges_at_scale(points, map_to_original)

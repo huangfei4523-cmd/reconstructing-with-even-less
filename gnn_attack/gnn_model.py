@@ -296,58 +296,70 @@ def generate_training_data_v2(num_samples=500, configs=None):
         responses_list: list of list of sets, 每个样本的采样响应
     """
     if configs is None:
-        configs = [
-            {"type": "grid_2d",    "ratio": 0.40, "grid": (10, 10), "density": 2, "ratio_resp": 0.05},
-            {"type": "grid_2d",    "ratio": 0.15, "grid": (8, 8),   "density": 1, "ratio_resp": 0.03},
-            {"type": "random_2d",  "ratio": 0.20, "N_points": 60,   "range": (15, 15), "ratio_resp": 0.05},
-            {"type": "random_3d",  "ratio": 0.10, "N_points": 80,   "range": (6, 6, 6), "ratio_resp": 0.05},
-            {"type": "random_2d",  "ratio": 0.10, "N_points": 40,   "range": (10, 10), "ratio_resp": 0.10},
-            {"type": "random_3d",  "ratio": 0.05, "N_points": 50,   "range": (4, 4, 4), "ratio_resp": 0.10},
-        ]
-
-    # 归一化 ratio
-    total_ratio = sum(c["ratio"] for c in configs)
-    for c in configs:
-        c["ratio"] /= total_ratio
+        # §1.2 Step 1: 参数空间网格 (N × 形状 × p)
+        # N: 20~800, 形状: grid/random/circle/contour, p: 1%~50%
+        # 总计 ~1500 样本覆盖 210 种配置
+        ns = [20, 40, 80, 150, 300, 500, 800]
+        ps = [0.01, 0.03, 0.05, 0.10, 0.20, 0.50]
+        shapes_2d = ["grid_2d", "random_2d"]
+        shapes_3d = ["random_3d"]
+        
+        configs = []
+        for n in ns:
+            for p in ps:
+                # grid_2d: 规则栅格
+                grid_sz = min(max(4, int(n ** 0.5)), 30)
+                configs.append({"type": "grid_2d", "ratio": 1.0, "grid": (grid_sz, grid_sz),
+                                "density": max(1, n // (grid_sz * grid_sz // 2)), "ratio_resp": p,
+                                "N_override": n})
+                # random_2d: 随机点云
+                rng = max(10, int(n ** 0.6))
+                configs.append({"type": "random_2d", "ratio": 1.0, "N_points": n,
+                                "range": (rng, rng), "ratio_resp": p})
+        
+        # 3D 场景（占比 15%）
+        for n in [40, 80, 150]:
+            for p in [0.05, 0.20]:
+                sz = max(3, int(n ** 0.33))
+                configs.append({"type": "random_3d", "ratio": 0.25, "N_points": n,
+                                "range": (sz, sz, sz), "ratio_resp": p})
 
     node_features_list = []
     adjacency_list = []
     responses_list = []
 
-    config_counts = {i: 0 for i in range(len(configs))}
-
     pbar = tqdm.tqdm(total=num_samples, desc="生成训练数据 v2")
 
+    # §1.2 Step 1: 轮询所有配置，每种配置生成 min(5, remaining) 个样本
+    cfg_idx = 0
     while len(node_features_list) < num_samples:
-        r = random.random()
-        cum = 0
-        cfg_idx = 0
-        for i, c in enumerate(configs):
-            cum += c["ratio"]
-            if r <= cum:
-                cfg_idx = i
-                break
-
         c = configs[cfg_idx]
+        samples_per = min(5, num_samples - len(node_features_list))
 
-        if c["type"] == "grid_2d":
-            g0, g1 = c["grid"]
-            result = _generate_one_scene_2d_grid(g0, g1, c["density"], c["ratio_resp"])
-        elif c["type"] == "random_2d":
-            rx, ry = c["range"]
-            result = _generate_one_scene_random_2d(c["N_points"], rx, ry, c["ratio_resp"])
-        elif c["type"] == "random_3d":
-            rx, ry, rz = c["range"]
-            result = _generate_one_scene_random_3d(c["N_points"], rx, ry, rz, c["ratio_resp"])
-        else:
-            continue
+        for _ in range(samples_per):
+            if c["type"] == "grid_2d":
+                g0, g1 = c["grid"]
+                n_pts = c.get("N_override")
+                if n_pts:
+                    result = _generate_one_scene_random_2d(n_pts, g0 * 3, g1 * 3, c["ratio_resp"])
+                else:
+                    result = _generate_one_scene_2d_grid(g0, g1, c["density"], c["ratio_resp"])
+            elif c["type"] == "random_2d":
+                rx, ry = c["range"]
+                result = _generate_one_scene_random_2d(c["N_points"], rx, ry, c["ratio_resp"])
+            elif c["type"] == "random_3d":
+                rx, ry, rz = c["range"]
+                result = _generate_one_scene_random_3d(c["N_points"], rx, ry, rz, c["ratio_resp"])
+            else:
+                continue
 
-        if result is not None:
-            node_features_list.append(result[0])
-            adjacency_list.append(result[1])
-            responses_list.append(result[2])
-            config_counts[cfg_idx] += 1
-            pbar.update(1)
+            if result is not None:
+                node_features_list.append(result[0])
+                adjacency_list.append(result[1])
+                responses_list.append(result[2])
+                pbar.update(1)
+
+        cfg_idx = (cfg_idx + 1) % len(configs)
 
     pbar.close()
     return node_features_list, adjacency_list, responses_list
@@ -419,12 +431,13 @@ class EdgePredictionGNN(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         )
 
-    def forward(self, node_features, edge_index, edge_features=None):
+    def forward(self, node_features, edge_index, edge_features=None, edge_weights=None):
         """
         Args:
             node_features: [N, feature_dim] 节点特征
-            edge_index: [2, E] 稀疏边索引（消息传递图）
+            edge_index: [2, E] 稀疏边索引（消息传递图 = 所有共现对）
             edge_features: [E, edge_feat_dim] 边特征（可选，用于边预测）
+            edge_weights: [E] 消息传递权重（= 归一化共现值）
 
         Returns:
             node_emb: [N, emb_dim] 节点嵌入
@@ -435,18 +448,24 @@ class EdgePredictionGNN(nn.Module):
         # 节点编码
         h = self.node_encoder(node_features)
 
-        # GraphSAGE 消息传递
+        # 共现加权消息传递（设计文档 §1.3）
         for l_idx in range(self.num_mp_layers):
             row, col = edge_index[0], edge_index[1]
 
-            # 聚合邻居消息: mean aggregation
-            msg = h[col]
-            # 散点求和然后除以度
+            # 加权聚合: agg_i = Σ_j w_ij * h_j / Σ_j w_ij
+            msg = h[col]  # [E, emb_dim]
+            if edge_weights is not None:
+                w = edge_weights.unsqueeze(-1)  # [E, 1]
+                msg = msg * w
+
             agg = torch.zeros_like(h)
             agg = agg.index_add(0, row, msg)
             deg = torch.zeros(N, 1, device=h.device)
-            deg = deg.index_add(0, row, torch.ones_like(msg[:, :1]))
-            deg = deg.clamp(min=1)
+            ones = torch.ones(msg.shape[0], 1, device=h.device)
+            if edge_weights is not None:
+                ones = ones * edge_weights.unsqueeze(-1)
+            deg = deg.index_add(0, row, ones)
+            deg = deg.clamp(min=1e-8)
             agg = agg / deg
 
             # GraphSAGE: concat(self, neighbors) → Linear
@@ -467,7 +486,6 @@ class EdgePredictionGNN(nn.Module):
                 edge_features = edge_features.to(pred_input.device)
             pred_input = torch.cat([pred_input, edge_features], dim=-1)
         else:
-            # 无边缘特征时用零填充
             zero_feat = torch.zeros(pred_input.shape[0], self.edge_feat_dim, device=pred_input.device)
             pred_input = torch.cat([pred_input, zero_feat], dim=-1)
 
@@ -552,21 +570,22 @@ def train_gnn_model(
             adj_gt_2d = adj_gt[0]           # [N, N] — 去掉 batch 维度
             responses = responses[0]        # 去掉 batch 维度
 
-            # 构建消息传递图（稀疏 k-NN）
-            edge_index = build_message_passing_graph_from_features(node_feat_2d.cpu().numpy(), k=10)
+            # §1.3: 构建共现加权消息传递图
+            cooc_approx = node_feat_2d[:, :3].cpu().numpy()
+            cooc_sim = cooc_approx @ cooc_approx.T
+            edge_index, edge_weights = build_cooc_message_graph(cooc_sim)
             edge_index = torch.LongTensor(edge_index).to(device)
+            edge_weights = torch.FloatTensor(edge_weights).to(device)
 
             if edge_index.shape[1] == 0:
                 continue
 
             # 提取边特征
-            cooc_approx = node_feat_2d[:, :3].cpu().numpy()  # 用前3维构造近似共现
-            cooc_sim = cooc_approx @ cooc_approx.T
             edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
             edge_feat = torch.FloatTensor(edge_feat_np).to(device)
 
-            # 前向
-            _, edge_logits = model(node_feat_2d, edge_index, edge_feat)
+            # 前向（带共现权重）
+            _, edge_logits = model(node_feat_2d, edge_index, edge_feat, edge_weights)
 
             # 收集训练边的标签（只监督消息传递图中的边）
             edge_labels = adj_gt_2d[edge_index[0], edge_index[1]]
@@ -612,20 +631,20 @@ def train_gnn_model(
                     node_feat_2d = node_feat[0]
                     adj_gt_2d = adj_gt[0]
                     responses = responses[0]
-                    edge_index = build_message_passing_graph_from_features(
-                        node_feat_2d.cpu().numpy(), k=10
-                    )
+
+                    cooc_approx = node_feat_2d[:, :3].cpu().numpy()
+                    cooc_sim = cooc_approx @ cooc_approx.T
+                    edge_index, edge_weights = build_cooc_message_graph(cooc_sim)
                     edge_index = torch.LongTensor(edge_index).to(device)
+                    edge_weights = torch.FloatTensor(edge_weights).to(device)
 
                     if edge_index.shape[1] == 0:
                         continue
 
-                    cooc_approx = node_feat_2d[:, :3].cpu().numpy()
-                    cooc_sim = cooc_approx @ cooc_approx.T
                     edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
                     edge_feat = torch.FloatTensor(edge_feat_np).to(device)
 
-                    _, edge_logits = model(node_feat_2d, edge_index, edge_feat)
+                    _, edge_logits = model(node_feat_2d, edge_index, edge_feat, edge_weights)
                     edge_labels = adj_gt_2d[edge_index[0], edge_index[1]]
 
                     pos_mask = edge_labels > 0.5
@@ -662,84 +681,51 @@ def train_gnn_model(
 
 
 # ═══════════════════════════════════════════════════════════
-# 6. 消息传递图构建
+# 6. 共现图消息传递构建（设计文档 §1.3）
 # ═══════════════════════════════════════════════════════════
 
-def build_message_passing_graph(cooc_matrix, k=10):
+def build_cooc_message_graph(cooc_matrix):
     """
-    基于共现余弦相似度构建稀疏 k-NN 消息传递图。
+    基于共现矩阵构建加权消息传递图。
+    边 = 所有 C[i,j] > 0 的点对。
+    权重 = softmax(1 / log(1 + C[i,j]))。
+    这与设计文档 §1.3 一致。
 
     Args:
         cooc_matrix: N×N 共现矩阵
-        k: 每个节点的近邻数
 
     Returns:
-        edge_index: [2, E] int64 numpy 数组
+        edge_index: [2, E] int64
+        edge_weights: [E] float32, 归一化后用于消息传递的权重
     """
     N = cooc_matrix.shape[0]
-    k = min(k, N - 1)
-    if k <= 0:
-        return np.zeros((2, 0), dtype=np.int64)
-
-    edges = []
-    for i in range(N):
-        vec_i = cooc_matrix[i]
-        sim = vec_i @ cooc_matrix.T
-        norms = np.linalg.norm(cooc_matrix, axis=1)
-        norms[norms == 0] = 1
-        sim = sim / (np.linalg.norm(vec_i) + 1e-8) / (norms + 1e-8)
-        sim[i] = -np.inf
-        top_k = np.argsort(-sim)[:k]
-        for j in top_k:
-            edges.append([i, j])
-
-    edge_index = np.array(edges, dtype=np.int64).T
-    # 对称化
-    if edge_index.size > 0:
-        rev = np.stack([edge_index[1], edge_index[0]], axis=0)
-        edge_index = np.concatenate([edge_index, rev], axis=1)
-        edge_index = np.unique(edge_index, axis=1)
-
-    return edge_index
-
-
-def build_message_passing_graph_from_features(node_features, k=10):
-    """
-    从节点特征矩阵构建稀疏 k-NN 消息传递图（用前几维做余弦相似度）。
-
-    Args:
-        node_features: [N, F] 节点特征
-        k: 每节点近邻数
-
-    Returns:
-        edge_index: [2, E] int64 numpy 数组
-    """
-    N = node_features.shape[0]
-    k = min(k, N - 1)
-    if k <= 0:
-        return np.zeros((2, 0), dtype=np.int64)
-
-    # 用前 6 维做相似度
-    vecs = node_features[:, :min(6, node_features.shape[1])]
     eps = 1e-8
-    edges = []
-    for i in range(N):
-        vi = vecs[i]
-        dot = vi @ vecs.T
-        n_i = np.linalg.norm(vi) + eps
-        n_all = np.linalg.norm(vecs, axis=1) + eps
-        sim = dot / (n_i * n_all)
-        sim[i] = -np.inf
-        top_k = np.argsort(-sim)[:k]
-        for j in top_k:
-            edges.append([i, j])
 
-    edge_index = np.array(edges, dtype=np.int64).T if edges else np.zeros((2, 0), dtype=np.int64)
-    if edge_index.size > 0:
-        rev = np.stack([edge_index[1], edge_index[0]], axis=0)
-        edge_index = np.concatenate([edge_index, rev], axis=1)
-        edge_index = np.unique(edge_index, axis=1)
-    return edge_index
+    # 取所有共现对 (上三角，避免重复)
+    rows, cols = np.where(np.triu(cooc_matrix > 0, k=1))
+    if len(rows) == 0:
+        return np.zeros((2, 0), dtype=np.int64), np.zeros((0,), dtype=np.float32)
+
+    # 对称化
+    src = np.concatenate([rows, cols])
+    dst = np.concatenate([cols, rows])
+    edge_index = np.stack([src, dst], axis=0).astype(np.int64)
+
+    # 共现权重: α_ij = 1 / log(1 + C[i,j])
+    cooc_vals = cooc_matrix[rows, cols]
+    w = 1.0 / np.log(1.0 + cooc_vals + eps)
+    w = np.concatenate([w, w])  # 对称化
+
+    # Softmax 归一化（每个目标节点对其入边做 softmax）
+    w_normalized = np.zeros_like(w)
+    for i in range(N):
+        mask = edge_index[1] == i
+        if mask.any():
+            w_i = w[mask]
+            w_i_exp = np.exp(w_i - w_i.max())  # 稳定 softmax
+            w_normalized[mask] = w_i_exp / (w_i_exp.sum() + eps)
+
+    return edge_index, w_normalized.astype(np.float32)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -771,9 +757,10 @@ def predict_edges_from_cooccurrence(model, cooc_matrix, responses=None, device="
     # 提取节点特征
     node_feat = torch.FloatTensor(extract_node_features(cooc_matrix)).to(device)
 
-    # 构建消息传递图
-    edge_index = build_message_passing_graph(cooc_matrix, k=min(10, N - 1))
+    # §1.3: 构建共现加权消息传递图
+    edge_index, edge_weights = build_cooc_message_graph(cooc_matrix)
     edge_index_t = torch.LongTensor(edge_index).to(device)
+    edge_weights_t = torch.FloatTensor(edge_weights).to(device) if edge_weights.size > 0 else None
 
     # 提取边特征
     if responses is not None and edge_index.shape[1] > 0:
@@ -783,7 +770,7 @@ def predict_edges_from_cooccurrence(model, cooc_matrix, responses=None, device="
         edge_feat_t = None
 
     with torch.no_grad():
-        node_emb, _ = model(node_feat, edge_index_t, edge_feat_t)
+        node_emb, _ = model(node_feat, edge_index_t, edge_feat_t, edge_weights_t)
         edge_probs = model.predict_all_pairs(node_emb)
         edge_probs = edge_probs.cpu().numpy()
 
@@ -795,3 +782,90 @@ def predict_edges_from_cooccurrence(model, cooc_matrix, responses=None, device="
                 edges.append((i, j))
 
     return edges, edge_probs
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. 评估工具
+# ═══════════════════════════════════════════════════════════
+
+def _get_correct_edges_at_scale(points, dictionarry):
+    """根据真实坐标计算正确答案边集合（曼哈顿距离 ≤1 的点对）。
+
+    Args:
+        points: 点 token 列表
+        dictionarry: token → 坐标 (x,y) 或 (x,y,z) 的映射
+
+    Returns:
+        正确边集合 set of ((x1,y1), (x2,y2))
+    """
+    opposite_map = {}
+    for i in dictionarry:
+        val = tuple(dictionarry[i])
+        if val in opposite_map:
+            opposite_map[val].append(i)
+        else:
+            opposite_map[val] = [i]
+    edges = set()
+    for i in dictionarry:
+        neighbors = []
+        coord = dictionarry[i]
+        if len(coord) == 3:
+            x, y, z = coord
+            neighbors = [(x+1,y,z), (x-1,y,z), (x,y+1,z), (x,y-1,z), (x,y,z+1), (x,y,z-1)]
+        else:
+            x, y = coord
+            neighbors = [(x+1,y), (x-1,y), (x,y+1), (x,y-1)]
+        for n in neighbors:
+            if n in opposite_map:
+                for nt in opposite_map[n]:
+                    edges.add((tuple(dictionarry[i]), tuple(dictionarry[nt])))
+                    edges.add((tuple(dictionarry[nt]), tuple(dictionarry[i])))
+    return edges
+
+
+def check_accuracy_with_edges(G, dictionarry, points):
+    """计算预测图的 Precision 和 Recall。
+
+    Args:
+        G: networkx 图
+        dictionarry: token → 坐标的映射
+        points: 点 token 列表
+
+    Returns:
+        precision, recall
+    """
+    import numpy as np
+    correct_edges_set = set()
+    incorrect = 0
+    edges = list(G.edges())
+    max_correct = _get_correct_edges_at_scale(points, dictionarry)
+
+    for i in edges:
+        correct_edge = False
+        front_nodes = i[0]
+        end_nodes = i[1]
+        good = True
+        point = dictionarry[front_nodes[0]]
+        for f in list(front_nodes):
+            if point != dictionarry[f]:
+                good = False
+        point = dictionarry[end_nodes[0]]
+        for e in list(end_nodes):
+            if point != dictionarry[e]:
+                good = False
+        if good:
+            translated_node = (tuple(dictionarry[front_nodes[0]]), tuple(dictionarry[end_nodes[0]]))
+            if np.linalg.norm(np.array(translated_node[0]) -
+                               np.array(translated_node[1])) <= 1:
+                correct_edge = True
+        if correct_edge:
+            tn = translated_node
+            if tn not in correct_edges_set and (tn[1], tn[0]) not in correct_edges_set:
+                correct_edges_set.add(tn)
+                correct_edges_set.add((tn[1], tn[0]))
+        else:
+            incorrect += 1
+
+    precision = len(correct_edges_set) / (len(correct_edges_set) + incorrect + 1e-10)
+    recall = len(correct_edges_set) / (len(max_correct) + 1e-10)
+    return precision, recall

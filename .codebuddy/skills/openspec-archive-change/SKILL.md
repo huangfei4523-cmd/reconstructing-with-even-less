@@ -58,12 +58,9 @@ metadata:
    - 将每个增量规范与其在 `openspec/specs/<capability>/spec.md` 对应的各主规范进行比较
    - 确定将应用哪些更改（添加、修改、移除、重命名）
    - 在提示前显示综合摘要
+   - 默认总是 先"立即同步（推荐）",然后"立即归档"   
 
-   **提示选项：**
-   - 如果需要更改："立即同步（推荐）"、"归档而不同步"
-   - 如果已同步："立即归档"、"仍然同步"、"取消"
-
-   如果用户选择同步，使用 Task tool（subagent_type: "general-purpose", prompt: "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec analysis: <include the analyzed delta spec summary>"）。无论选择如何，都继续归档。
+   使用 Task tool（subagent_type: "general-purpose", prompt: "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec analysis: <include the analyzed delta spec summary>"）。无论选择如何，都继续归档。
 
 5. **执行归档**
 
