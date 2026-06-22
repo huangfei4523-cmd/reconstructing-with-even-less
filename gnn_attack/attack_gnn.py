@@ -90,31 +90,39 @@ def main():
     map_to_original = ds["map_to_original"]
     N0, N1 = ds["N0"], ds["N1"]
 
-    print("Phase 2 数据准备: 计算目标共现矩阵...")
+    print("Phase 2 数据准备: 流式计算目标共现矩阵...")
     responses = process_database.get_responses_no_vals(points, map_to_original, N0, N1)
     sample_size = max(1, int(len(responses) * args.p / 100))
     sampled = process_database.sample_uniform(responses, sample_size)
-    new_responses, _ = process_database.get_actual_resps_after_sampling(
-        sampled, points, map_to_original)
 
-    # 共现矩阵
-    all_pts = set()
-    for r in new_responses:
-        all_pts.update(r)
-    all_pts = sorted(all_pts)
+    # 流式构建共现矩阵：不存储全部响应集合，逐条处理
+    all_pts_set = set()
+    for min0, max0, min1, max1 in sampled:
+        for p in points:
+            if map_to_original[p][0] <= max0 and map_to_original[p][0] >= min0 \
+               and map_to_original[p][1] <= max1 and map_to_original[p][1] >= min1:
+                all_pts_set.add(p)
+    all_pts = sorted(all_pts_set)
     token_to_idx = {t: i for i, t in enumerate(all_pts)}
     N = len(all_pts)
     C_target = np.zeros((N, N), dtype=np.float32)
-    for r in new_responses:
+
+    for min0, max0, min1, max1 in sampled:
+        r = [p for p in points
+             if map_to_original[p][0] <= max0 and map_to_original[p][0] >= min0
+             and map_to_original[p][1] <= max1 and map_to_original[p][1] >= min1]
+        if len(r) < 2:
+            continue
         idxs = [token_to_idx[t] for t in r]
         for a in idxs:
             for b in idxs:
                 if a != b:
                     C_target[a, b] += 1.0
                     C_target[b, a] += 1.0
+
     total = C_target.sum(axis=1, keepdims=True) + 1e-8
     C_target = C_target / total
-    print(f"  共 {N} 个点")
+    print(f"  共 {N} 个点, {len(sampled)} 条采样查询")
 
     # ── Phase 2: 自训练 (§2) ──
     print(f"\n{'─'*40}\nPhase 2: 自训练\n{'─'*40}")
@@ -136,9 +144,10 @@ def main():
 
     # ── 评估: Precision/Recall ──
     G = nx.Graph()
-    G.add_nodes_from(range(N))
-    for i, j, _ in E_hat:
-        G.add_edge(i, j)
+    id_to_token = {i: all_pts[i] for i in range(N)}
+    for idx_i, idx_j, _ in E_hat:
+        tok_i, tok_j = id_to_token[idx_i], id_to_token[idx_j]
+        G.add_edge(tok_i, tok_j)
     precision, recall = check_accuracy_with_edges(G, map_to_original, points)
     print(f"\n{'─'*40}")
     print(f"评估: Precision={precision:.4f}  Recall={recall:.4f}  Edges={len(E_hat)}")

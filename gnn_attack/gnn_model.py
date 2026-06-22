@@ -826,6 +826,10 @@ def _get_correct_edges_at_scale(points, dictionarry):
 def check_accuracy_with_edges(G, dictionarry, points):
     """计算预测图的 Precision 和 Recall。
 
+    支持两种图结构:
+    1. 整数节点图 — 节点直接对应 dictionarry 的 key
+    2. frozenset 节点图 — 旧架构，一个节点可能聚合多个 token
+
     Args:
         G: networkx 图
         dictionarry: token → 坐标的映射
@@ -840,24 +844,36 @@ def check_accuracy_with_edges(G, dictionarry, points):
     edges = list(G.edges())
     max_correct = _get_correct_edges_at_scale(points, dictionarry)
 
-    for i in edges:
+    for src, dst in edges:
         correct_edge = False
-        front_nodes = i[0]
-        end_nodes = i[1]
-        good = True
-        point = dictionarry[front_nodes[0]]
-        for f in list(front_nodes):
-            if point != dictionarry[f]:
-                good = False
-        point = dictionarry[end_nodes[0]]
-        for e in list(end_nodes):
-            if point != dictionarry[e]:
-                good = False
-        if good:
-            translated_node = (tuple(dictionarry[front_nodes[0]]), tuple(dictionarry[end_nodes[0]]))
-            if np.linalg.norm(np.array(translated_node[0]) -
-                               np.array(translated_node[1])) <= 1:
+
+        # 检测节点类型
+        if isinstance(src, int) and isinstance(dst, int):
+            # 整数节点图：直接拿坐标比较曼哈顿距离
+            coord_src = tuple(dictionarry[src])
+            coord_dst = tuple(dictionarry[dst])
+            if np.linalg.norm(np.array(coord_src) - np.array(coord_dst)) <= 1:
                 correct_edge = True
+                translated_node = (coord_src, coord_dst)
+        else:
+            # frozenset 节点图（兼容旧架构）
+            front_nodes, end_nodes = src, dst
+            good = True
+            point = dictionarry[list(front_nodes)[0]]
+            for f in front_nodes:
+                if point != dictionarry[f]:
+                    good = False
+            point_e = dictionarry[list(end_nodes)[0]]
+            for e in end_nodes:
+                if point_e != dictionarry[e]:
+                    good = False
+            if good:
+                translated_node = (tuple(dictionarry[list(front_nodes)[0]]),
+                                   tuple(dictionarry[list(end_nodes)[0]]))
+                if np.linalg.norm(np.array(translated_node[0]) -
+                                   np.array(translated_node[1])) <= 1:
+                    correct_edge = True
+
         if correct_edge:
             tn = translated_node
             if tn not in correct_edges_set and (tn[1], tn[0]) not in correct_edges_set:

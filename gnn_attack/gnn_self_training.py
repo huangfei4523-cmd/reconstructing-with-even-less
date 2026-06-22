@@ -140,25 +140,30 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
                 break
         prev_pos = curr_pos
 
-        # 4. 微调
+        # 4. 微调（§2.2 修复：完整共现图消息传递 + 伪标签边单独预测）
         model.train()
         pos_tensor = torch.tensor([[p[0], p[1]] for p in pos], dtype=torch.long, device=device)
         neg_tensor = torch.tensor([[n[0], n[1]] for n in neg], dtype=torch.long, device=device)
 
-        # 前向
-        _, pos_logits = model(node_feat, pos_tensor.t().contiguous(), None, None)
-        _, neg_logits = model(node_feat, neg_tensor.t().contiguous(), None, None)
+        # 用完整共现图做消息传递获得节点嵌入
+        node_emb_train, _ = model(node_feat, edge_idx_t, None, edge_w_t)
+        # 在伪标签边上单独拼接 src+dst 嵌入 → edge_predictor
+        edge_feat_dim = model.edge_feat_dim
+        zero_feat = torch.zeros(pos_tensor.size(0), edge_feat_dim, device=device)
+        pos_input = torch.cat([node_emb_train[pos_tensor[:, 0]],
+                               node_emb_train[pos_tensor[:, 1]], zero_feat], dim=-1)
+        pos_logits = model.edge_predictor(pos_input).squeeze(-1)
+        zero_feat_n = torch.zeros(neg_tensor.size(0), edge_feat_dim, device=device)
+        neg_input = torch.cat([node_emb_train[neg_tensor[:, 0]],
+                               node_emb_train[neg_tensor[:, 1]], zero_feat_n], dim=-1)
+        neg_logits = model.edge_predictor(neg_input).squeeze(-1)
 
-        # 一致性正则化
+        # 一致性正则化（使用相同消息传递图，只替换节点特征）
         C_pert = PerturbCooc(C_target, 0.05)
         node_feat_p = torch.FloatTensor(extract_node_features(C_pert)).to(device)
-        edge_idx_p, edge_w_p = build_cooc_message_graph(C_pert)
-        edge_idx_p = torch.LongTensor(edge_idx_p).to(device)
-        edge_w_p = torch.FloatTensor(edge_w_p).to(device)
-        _, logits_p = model(node_feat_p, edge_idx_p, None, edge_w_p)
+        _, logits_p = model(node_feat_p, edge_idx_t, None, edge_w_t)
         _, logits_orig = model(node_feat, edge_idx_t, None, edge_w_t)
-        min_len = min(logits_orig.shape[0], logits_p.shape[0])
-        consistency_loss = F.mse_loss(logits_orig[:min_len], logits_p[:min_len])
+        consistency_loss = F.mse_loss(logits_orig, logits_p)
 
         bce_pos = F.binary_cross_entropy_with_logits(
             pos_logits, torch.ones_like(pos_logits))
