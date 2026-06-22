@@ -12,6 +12,7 @@ import argparse, sys, os, time, json
 import numpy as np
 import torch
 import networkx as nx
+import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -95,19 +96,14 @@ def main():
     sample_size = max(1, int(len(responses) * args.p / 100))
     sampled = process_database.sample_uniform(responses, sample_size)
 
-    # 流式构建共现矩阵：不存储全部响应集合，逐条处理
-    all_pts_set = set()
-    for min0, max0, min1, max1 in sampled:
-        for p in points:
-            if map_to_original[p][0] <= max0 and map_to_original[p][0] >= min0 \
-               and map_to_original[p][1] <= max1 and map_to_original[p][1] >= min1:
-                all_pts_set.add(p)
-    all_pts = sorted(all_pts_set)
+    # 流式构建共现矩阵（不存储全部响应集合，逐条处理）
+    all_pts = sorted(set(points))
     token_to_idx = {t: i for i, t in enumerate(all_pts)}
     N = len(all_pts)
     C_target = np.zeros((N, N), dtype=np.float32)
+    effective = 0
 
-    for min0, max0, min1, max1 in sampled:
+    for min0, max0, min1, max1 in tqdm.tqdm(sampled, desc="  构建共现矩阵"):
         r = [p for p in points
              if map_to_original[p][0] <= max0 and map_to_original[p][0] >= min0
              and map_to_original[p][1] <= max1 and map_to_original[p][1] >= min1]
@@ -119,10 +115,11 @@ def main():
                 if a != b:
                     C_target[a, b] += 1.0
                     C_target[b, a] += 1.0
+        effective += 1
 
     total = C_target.sum(axis=1, keepdims=True) + 1e-8
     C_target = C_target / total
-    print(f"  共 {N} 个点, {len(sampled)} 条采样查询")
+    print(f"  共 {N} 个点, {effective}/{len(sampled)} 条有效查询 (len≥2)")
 
     # ── Phase 2: 自训练 (§2) ──
     print(f"\n{'─'*40}\nPhase 2: 自训练\n{'─'*40}")

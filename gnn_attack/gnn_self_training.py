@@ -4,6 +4,7 @@ Phase 2: 自训练模块 — 设计文档详细设计 §2
 在目标加密数据的共现矩阵上，用预训练 GNN 的高置信度预测作为伪标签，
 通过迭代微调使模型适应目标分布。
 """
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -110,6 +111,7 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
     overlap_history = []
 
     for t in range(max_iter):
+        t_start = time.time()
         # 1. 推理
         model.eval()
         node_feat = torch.FloatTensor(extract_node_features(C_target)).to(device)
@@ -139,6 +141,8 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
                 print(f"  Phase 2 发散警告: iter={t}, overlap 连续下降")
                 break
         prev_pos = curr_pos
+        overlap_str = f"{overlap_history[-1]:.3f}" if overlap_history else "N/A"
+        print(f"  iter {t}: pos={len(pos)}  neg={len(neg)}  overlap={overlap_str}")
 
         # 4. 微调（§2.2 修复：完整共现图消息传递 + 伪标签边单独预测）
         model.train()
@@ -175,6 +179,7 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        print(f"         loss={loss.item():.4f}  time={time.time()-t_start:.1f}s")
 
         best_E_hat = [(i, j, float(prob_matrix[i, j])) for i, j in curr_pos]
 

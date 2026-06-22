@@ -1,0 +1,3 @@
+- [x] 1.1 `attack_gnn.py` 流式扫描加 tqdm 进度条，打印有效查询数
+- [x] 1.2 第一遍扫描优化：直接用 `all_pts = sorted(set(points))`，跳过流式扫描
+- [x] 1.3 `gnn_self_training.py` 每轮开始打印 `iter=N/M` + edges + overlap，结束后打印 loss + 耗时

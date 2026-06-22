@@ -26,6 +26,20 @@
 - **当** 连续 3 轮伪正样本边集合重合率持续下降
 - **那么** 自训练终止，取历史最佳边集合并报告发散原因
 
+#### 场景: 微调消息传递使用完整图
+
+- **当** `SelfTrainingLoop` 的每次微调迭代执行前向传播
+- **那么** 消息传递的 `edge_index` 必须是完整的共现图（通过 `build_cooc_message_graph` 构建）
+- **而且** 边预测 logits 只对伪标签边单独计算：拼接 `node_emb[src]` + `node_emb[dst]` → `edge_predictor`
+- **而且** 不得只用伪标签边作为消息传递图
+
+#### 场景: 一致性正则化 logits 长度一致
+
+- **当** 计算扰动后共现的 consistency loss
+- **那么** `logits_orig` 和 `logits_p` 必须使用相同的 `edge_idx_t` 做消息传递
+- **那么** 只替换 `node_feat`（扰动前后），不替换 `edge_index`
+- **那么** 无需 `min_len` 截断
+
 ### 需求: 输入输出约束
 
 自训练模块必须只通过共现矩阵与外部交互。
