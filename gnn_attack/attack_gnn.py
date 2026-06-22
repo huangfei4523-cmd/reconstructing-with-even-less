@@ -12,7 +12,6 @@ import argparse, sys, os, time, json
 import numpy as np
 import torch
 import networkx as nx
-import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -91,35 +90,32 @@ def main():
     map_to_original = ds["map_to_original"]
     N0, N1 = ds["N0"], ds["N1"]
 
-    print("Phase 2 数据准备: 流式计算目标共现矩阵...")
-    responses = process_database.get_responses_no_vals(points, map_to_original, N0, N1)
-    sample_size = max(1, int(len(responses) * args.p / 100))
-    sampled = process_database.sample_uniform(responses, sample_size)
-
-    # 流式构建共现矩阵（不存储全部响应集合，逐条处理）
+    print("Phase 2 数据准备: 闭式公式计算共现矩阵...")
     all_pts = sorted(set(points))
-    token_to_idx = {t: i for i, t in enumerate(all_pts)}
     N = len(all_pts)
-    C_target = np.zeros((N, N), dtype=np.float32)
-    effective = 0
 
-    for min0, max0, min1, max1 in tqdm.tqdm(sampled, desc="  构建共现矩阵"):
-        r = [p for p in points
-             if map_to_original[p][0] <= max0 and map_to_original[p][0] >= min0
-             and map_to_original[p][1] <= max1 and map_to_original[p][1] >= min1]
-        if len(r) < 2:
-            continue
-        idxs = [token_to_idx[t] for t in r]
-        for a in idxs:
-            for b in idxs:
-                if a != b:
-                    C_target[a, b] += 1.0
-                    C_target[b, a] += 1.0
-        effective += 1
+    # 获取按 all_pts 排序后的坐标数组 [N]
+    xs = np.array([map_to_original[t][0] for t in all_pts], dtype=np.float32)
+    ys = np.array([map_to_original[t][1] for t in all_pts], dtype=np.float32)
+
+    # 闭式公式: C[i,j] = min(xi,xj) * min(yi,yj) * (N0-max(xi,xj)) * (N1-max(yi,yj))
+    # 四个边界独立选择，乘积得到同时框住两点的矩形总数
+    min_x = np.minimum(xs[:, None], xs[None, :])   # [N, N]
+    max_x = np.maximum(xs[:, None], xs[None, :])
+    min_y = np.minimum(ys[:, None], ys[None, :])
+    max_y = np.maximum(ys[:, None], ys[None, :])
+
+    C_target = min_x * min_y * (N0 - max_x) * (N1 - max_y)
+    np.fill_diagonal(C_target, 0)   # 自共现置零
+    C_target = C_target.astype(np.float32)
+
+    # 采样率: 均匀随机采样 p% 的查询 → 期望共现值 = 全量 × p/100
+    if args.p < 100:
+        C_target = C_target * (args.p / 100.0)
 
     total = C_target.sum(axis=1, keepdims=True) + 1e-8
     C_target = C_target / total
-    print(f"  共 {N} 个点, {effective}/{len(sampled)} 条有效查询 (len≥2)")
+    print(f"  共 {N} 个点, C_target [{N}×{N}]")
 
     # ── Phase 2: 自训练 (§2) ──
     print(f"\n{'─'*40}\nPhase 2: 自训练\n{'─'*40}")
