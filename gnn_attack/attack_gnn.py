@@ -109,13 +109,19 @@ def main():
     np.fill_diagonal(C_target, 0)   # 自共现置零
     C_target = C_target.astype(np.float32)
 
-    # 采样率: 均匀随机采样 p% 的查询 → 期望共现值 = 全量 × p/100
+    # 采样率: Binomial(p) 模拟 → 期望 = 全量 × p/100, 方差 = c × p(1-p)/10000
     if args.p < 100:
-        C_target = C_target * (args.p / 100.0)
+        p_ratio = args.p / 100.0
+        C_target = C_target * p_ratio
+        # 二项相对噪声: σ_rel = sqrt((1-p_ratio) / (c * p_ratio))
+        eps = 1e-10
+        sigma_rel = np.sqrt((1.0 - p_ratio) / (np.abs(C_target) + eps))
+        noise = np.random.randn(N, N).astype(np.float32) * sigma_rel * C_target
+        C_target = np.clip(C_target + noise, 0, None)
 
     total = C_target.sum(axis=1, keepdims=True) + 1e-8
     C_target = C_target / total
-    print(f"  共 {N} 个点, C_target [{N}×{N}]")
+    print(f"  共 {N} 个点, C_target [{N}×{N}], p={args.p}%")
 
     # ── Phase 2: 自训练 (§2) ──
     print(f"\n{'─'*40}\nPhase 2: 自训练\n{'─'*40}")
@@ -123,7 +129,12 @@ def main():
     t0 = time.time()
     model_fine, E_hat = SelfTrainingLoop(model, C_target, max_iter=10, device=args.device)
     t2 = time.time() - t0
-    print(f"  Phase 2 完成: {len(E_hat)} 条推断边, {t2:.1f}s")
+    # 诊断: 推断边概率分布
+    edge_probs = [p for _, _, p in E_hat]
+    if edge_probs:
+        q = np.percentile(edge_probs, [0, 25, 50, 75, 100])
+        print(f"  Phase 2 完成: {len(E_hat)} 条推断边, prob=[min={q[0]:.3f} p25={q[1]:.3f} "
+              f"med={q[2]:.3f} p75={q[3]:.3f} max={q[4]:.3f}], {t2:.1f}s")
 
     # ── Phase 3: 形状重建 (§3) ──
     print(f"\n{'─'*40}\nPhase 3: 形状重建\n{'─'*40}")

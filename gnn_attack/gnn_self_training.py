@@ -100,6 +100,11 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
     Returns: (model_fine, E_hat) — 微调后模型 + 推断边集合 [(i,j,prob)]
     """
     N = C_target.shape[0]
+    # 诊断: C_target 统计
+    row_sum = C_target.sum(axis=1)
+    nonzero = (C_target > 0).sum(axis=1)
+    print(f"  C_target: N={N}  row_strength={row_sum.mean():.4f}±{row_sum.std():.4f}  "
+          f"nonzero_neighbors={nonzero.mean():.1f}±{nonzero.std():.1f}")
     model = model.to(device)
     optimizer = torch.optim.Adam([
         {"params": model.edge_predictor.parameters()},
@@ -126,6 +131,14 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
         # 2. 筛选伪标签
         pos, neg = SelectPseudoLabels(prob_matrix, N)
 
+        # 诊断: 伪标签置信度
+        pos_probs = [prob_matrix[i, j] for i, j in pos]
+        neg_probs = [prob_matrix[i, j] for i, j in neg]
+        pos_conf = np.mean(pos_probs) if pos_probs else 0
+        neg_conf = np.mean(neg_probs) if neg_probs else 0
+        all_probs = prob_matrix[np.triu_indices(N, k=1)]
+        prob_entropy = -(all_probs * np.log(all_probs + 1e-10) + (1-all_probs) * np.log(1-all_probs + 1e-10)).mean()
+
         # 3. 收敛判定 (§2.4)
         curr_pos = set(pos)
         if prev_pos:
@@ -142,7 +155,8 @@ def SelfTrainingLoop(model, C_target, max_iter=20, lr=0.0001, device="cpu"):
                 break
         prev_pos = curr_pos
         overlap_str = f"{overlap_history[-1]:.3f}" if overlap_history else "N/A"
-        print(f"  iter {t}: pos={len(pos)}  neg={len(neg)}  overlap={overlap_str}")
+        print(f"  iter {t}: pos={len(pos)}(conf={pos_conf:.3f})  neg={len(neg)}(conf={neg_conf:.3f})  "
+              f"entropy={prob_entropy:.3f}  overlap={overlap_str}")
 
         # 4. 微调（§2.2 修复：完整共现图消息传递 + 伪标签边单独预测）
         model.train()

@@ -279,7 +279,7 @@ def _make_sample_from_points(map_to_original, grid_bounds, response_sampling_rat
                 adj_gt[i, j] = 1.0
                 adj_gt[j, i] = 1.0
 
-    return node_feat, adj_gt, sampled
+    return node_feat, adj_gt, sampled, cooc
 
 
 def generate_training_data_v2(num_samples=500, configs=None):
@@ -294,6 +294,7 @@ def generate_training_data_v2(num_samples=500, configs=None):
         node_features_list: list of [N, 16] 节点特征
         adjacency_list: list of [N, N] 邻接标签
         responses_list: list of list of sets, 每个样本的采样响应
+        cooc_list: list of [N, N] 真正的共现计数矩阵
     """
     if configs is None:
         # §1.2 Step 1: 参数空间网格 (N × 形状 × p)
@@ -327,6 +328,7 @@ def generate_training_data_v2(num_samples=500, configs=None):
     node_features_list = []
     adjacency_list = []
     responses_list = []
+    cooc_list = []
 
     pbar = tqdm.tqdm(total=num_samples, desc="生成训练数据 v2")
 
@@ -357,12 +359,13 @@ def generate_training_data_v2(num_samples=500, configs=None):
                 node_features_list.append(result[0])
                 adjacency_list.append(result[1])
                 responses_list.append(result[2])
+                cooc_list.append(result[3])
                 pbar.update(1)
 
         cfg_idx = (cfg_idx + 1) % len(configs)
 
     pbar.close()
-    return node_features_list, adjacency_list, responses_list
+    return node_features_list, adjacency_list, responses_list, cooc_list
 
 
 # ═══════════════════════════════════════════════════════════
@@ -370,11 +373,12 @@ def generate_training_data_v2(num_samples=500, configs=None):
 # ═══════════════════════════════════════════════════════════
 
 class CooccurrenceDataset(torch.utils.data.Dataset):
-    """训练数据集：节点特征 + 邻接标签 + 采样响应。"""
-    def __init__(self, node_features_list, adjacency_list, responses_list):
+    """训练数据集：节点特征 + 邻接标签 + 采样响应 + 共现矩阵。"""
+    def __init__(self, node_features_list, adjacency_list, responses_list, cooc_list):
         self.node_features = [torch.FloatTensor(f) for f in node_features_list]
         self.adjacency = [torch.FloatTensor(a) for a in adjacency_list]
         self.responses = responses_list
+        self.cooc = cooc_list
 
     def __len__(self):
         return len(self.node_features)
@@ -382,7 +386,7 @@ class CooccurrenceDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # 将 frozenset 转为普通列表，以便 DataLoader 正确 collate
         resp = [list(r) for r in self.responses[idx]]
-        return self.node_features[idx], self.adjacency[idx], resp
+        return self.node_features[idx], self.adjacency[idx], resp, self.cooc[idx]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -563,17 +567,16 @@ def train_gnn_model(
         num_batches = 0
 
         for batch in train_loader:
-            node_feat, adj_gt, responses = batch
+            node_feat, adj_gt, responses, cooc = batch
             node_feat = node_feat.to(device)
             adj_gt = adj_gt.to(device)
             node_feat_2d = node_feat[0]     # [N, F] — 去掉 batch 维度
             adj_gt_2d = adj_gt[0]           # [N, N] — 去掉 batch 维度
             responses = responses[0]        # 去掉 batch 维度
+            cooc = cooc[0]                  # [N, N] — 去掉 batch 维度
 
-            # §1.3: 构建共现加权消息传递图
-            cooc_approx = node_feat_2d[:, :3].cpu().numpy()
-            cooc_sim = cooc_approx @ cooc_approx.T
-            edge_index, edge_weights = build_cooc_message_graph(cooc_sim)
+            # §1.3: 用真正的共现矩阵构建消息传递图
+            edge_index, edge_weights = build_cooc_message_graph(cooc)
             edge_index = torch.LongTensor(edge_index).to(device)
             edge_weights = torch.FloatTensor(edge_weights).to(device)
 
@@ -581,7 +584,7 @@ def train_gnn_model(
                 continue
 
             # 提取边特征
-            edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
+            edge_feat_np = extract_edge_features(cooc, responses, edge_index.cpu().numpy())
             edge_feat = torch.FloatTensor(edge_feat_np).to(device)
 
             # 前向（带共现权重）
@@ -625,23 +628,22 @@ def train_gnn_model(
             val_loss = 0
             val_batches = 0
             with torch.no_grad():
-                for node_feat, adj_gt, responses in val_loader:
+                for node_feat, adj_gt, responses, cooc in val_loader:
                     node_feat = node_feat.to(device)
                     adj_gt = adj_gt.to(device)
                     node_feat_2d = node_feat[0]
                     adj_gt_2d = adj_gt[0]
                     responses = responses[0]
+                    cooc = cooc[0]
 
-                    cooc_approx = node_feat_2d[:, :3].cpu().numpy()
-                    cooc_sim = cooc_approx @ cooc_approx.T
-                    edge_index, edge_weights = build_cooc_message_graph(cooc_sim)
+                    edge_index, edge_weights = build_cooc_message_graph(cooc)
                     edge_index = torch.LongTensor(edge_index).to(device)
                     edge_weights = torch.FloatTensor(edge_weights).to(device)
 
                     if edge_index.shape[1] == 0:
                         continue
 
-                    edge_feat_np = extract_edge_features(cooc_sim, responses, edge_index.cpu().numpy())
+                    edge_feat_np = extract_edge_features(cooc, responses, edge_index.cpu().numpy())
                     edge_feat = torch.FloatTensor(edge_feat_np).to(device)
 
                     _, edge_logits = model(node_feat_2d, edge_index, edge_feat, edge_weights)
